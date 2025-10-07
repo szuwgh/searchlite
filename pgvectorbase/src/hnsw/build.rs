@@ -3,6 +3,7 @@ use crate::datatype::Vector;
 use crate::error::VBResult;
 use crate::hnsw::option::HnswElement;
 use crate::hnsw::option::HnswElementData;
+use crate::hnsw::util::hnsw_entry_candidate;
 use core::ffi::c_void;
 use pgrx::info;
 use pgrx::notice;
@@ -11,12 +12,31 @@ use pgrx::pg_sys::list_make1_impl;
 use pgrx::pg_sys::palloc;
 use pgrx::pg_sys::Datum;
 use pgrx::pg_sys::FmgrInfo;
+use pgrx::pg_sys::ListCell;
 use pgrx::pg_sys::MemoryContextReset;
 use pgrx::pg_sys::MemoryContextSwitchTo;
+use pgrx::pg_sys::NodeTag::T_List;
 use pgrx::pg_sys::Oid;
 use pgrx::pg_sys::PointerGetDatum;
 use std::ptr;
 use std::ptr::copy_nonoverlapping;
+#[macro_export]
+macro_rules! list_make_ptr_cell {
+    ($e:expr) => {
+        ListCell {
+            ptr_value: $e as *mut std::os::raw::c_void,
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! list_make1 {
+    ($e:expr) => {
+        // 假设你的 Vector 结构体有一个字段 `x`，它是一个 float 数组或其他结构的起始标记
+        list_make1_impl(T_List, list_make_ptr_cell!($e))
+    };
+}
+
 // 1. index_rel: pg_sys::Relation
 // 这是当前正在构建的索引的关系对象（Relation），用于：
 // 调用索引构建相关函数（如插入索引条目）。
@@ -94,6 +114,8 @@ pub(crate) unsafe extern "C-unwind" fn build_callback(
     let element = HnswElementData::new(heap_tid, buildstate.m, buildstate.ml, buildstate.max_level);
     (*element).vec = palloc(VectorSize!(buildstate.dimensions as usize)) as *mut Vector;
     let old_ctx = MemoryContextSwitchTo(buildstate.tmp_ctx);
+
+    let inserted = insert_tuple(index_rel, values, element, buildstate, ptr::null_mut());
 }
 
 /**
@@ -106,13 +128,35 @@ unsafe fn insert_tuple(
     buildstate: &mut HnswBuildState,
     dup: *mut HnswElement,
 ) -> VBResult<()> {
+    /* 获取距离计算函数信息、排序规则等构建状态参数 */
+    let procinfo = buildstate.procinfo;
+    let collation = buildstate.collation;
+    let entry_point = buildstate.entry_point;
+    let ef_construction = buildstate.ef_construction;
+    let m = buildstate.m;
     let value_datum = values.add(0);
+    // 对向量数据进行解压缩（TOAST是PostgreSQL的存储机制）
     let detoasted_value = PointerGetDatum(pg_sys::pg_detoast_datum(value_datum.cast()).cast());
 
+    if buildstate.normprocinfo != ptr::null_mut() {
+        panic!("normprocinfo not supported");
+    }
+    //将处理后的向量值复制到元素结构中
     copy_nonoverlapping(
-        (*element).vec,
         DatumGetVector!(detoasted_value.cast_mut_ptr()),
+        (*element).vec,
         VectorSize!(buildstate.dimensions as usize),
+    );
+    //将元素插入到HNSW图结构中（核心操作）
+    hnsw_insert_element(
+        element,
+        entry_point,
+        index,
+        procinfo,
+        collation,
+        m,
+        ef_construction,
+        false,
     );
 
     Ok(())
@@ -125,17 +169,26 @@ unsafe fn hnsw_insert_element(
     element: HnswElement,
     entry_point: HnswElement,
     index: pg_sys::Relation,
-    fmgr_info: *mut FmgrInfo,
+    procinfo: *mut FmgrInfo,
     collation: Oid,
     m: i32,
     ef_construction: i32,
     existing: bool,
 ) {
-    let level = (*element).level;
-    let q = PointerGetDatum((*element).vec.cast());
-    let skip_element = if existing { element } else { ptr::null() };
+    let level = (*element).level; // 新元素被分配的最高层级
+    let q = PointerGetDatum((*element).vec.cast()); // 将新元素的向量转换为Datum格式，便于距离计算
+    let skip_element = if existing { element } else { ptr::null() }; // 如果是更新现有元素，则跳过自身
     if entry_point.is_null() {
         return;
     }
-    // let ep = list_make1_impl(arg_t, arg_datum1)
+    //初始化入口点候选列表，并获取入口点的层级
+    let ep = list_make1!(hnsw_entry_candidate(
+        entry_point,
+        q,
+        index,
+        procinfo,
+        collation,
+        true
+    ));
+    // 第一阶段：从高层到level+1层的贪婪搜索
 }

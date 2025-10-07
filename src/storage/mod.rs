@@ -1,3 +1,10 @@
+mod config;
+mod fs;
 mod meshstore;
 mod page;
-mod traker;
+mod tracker;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+}

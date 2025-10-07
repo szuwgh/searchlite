@@ -92,7 +92,7 @@ pub(crate) struct HnswBuildState {
 
     // 图结构
     elements: *mut List,
-    entry_point: HnswElement,
+    pub(crate) entry_point: HnswElement,
     pub(crate) ml: f64,
     pub(crate) max_level: i32,
     pub(crate) max_in_memory_elements: f64,
@@ -100,9 +100,9 @@ pub(crate) struct HnswBuildState {
     normvec: *mut Vector,
 
     // 支持函数
-    procinfo: *mut FmgrInfo,
-    normprocinfo: *mut FmgrInfo,
-    collation: pg_sys::Oid,
+    pub(crate) procinfo: *mut FmgrInfo,
+    pub(crate) normprocinfo: *mut FmgrInfo,
+    pub(crate) collation: pg_sys::Oid,
 
     // 内存上下文
     pub(crate) tmp_ctx: MemoryContext,
@@ -424,33 +424,38 @@ pub fn hnsw_get_ef_construction(index_rel: pg_sys::Relation) -> i32 {
 pub type HnswElement = *mut HnswElementData;
 
 // 保证与 C 兼容的内存布局
+// 经典的数据库设计思想：​​存储格式（on-disk format）​​
+// 与 ​​内存格式（in-memory format）​​ 的分离
+// 选择性地从元组中解码并加载向量数据（vec）到 HnswElement。​
+// ​这一步是关键​​，如果查询只需要计算距离而不需要返回原始行，
+// 甚至可以跳过加载 heaptids，节省了I/O和内存
 #[repr(C)]
 pub struct HnswElementData {
-    /// 堆元组 ID 列表（使用 PostgreSQL 的 List 结构）
+    // 堆元组 ID 列表（使用 PostgreSQL 的 List 结构）
     pub heaptids: *mut List,
 
-    /// 元素所在层级 (0 表示底层)
+    // 元素所在层级 (0 表示底层)
     pub level: u8,
 
-    /// 删除标记
+    // 删除标记
     pub deleted: u8,
 
-    /// 各层的邻居数组
+    // 各层的邻居数组
     pub neighbors: *mut HnswNeighborArray,
 
-    /// 磁盘位置：块号
+    // 磁盘位置：块号
     pub blkno: pg_sys::BlockNumber,
 
-    /// 磁盘位置：偏移号
+    // 磁盘位置：偏移号
     pub offno: pg_sys::OffsetNumber,
 
-    /// 邻居元组的偏移号
+    // 邻居元组的偏移号
     pub neighbor_offno: pg_sys::OffsetNumber,
 
-    /// 邻居元组所在块号
+    // 邻居元组所在块号
     pub neighbor_page: pg_sys::BlockNumber,
 
-    /// 向量数据
+    // 向量数据
     pub vec: *mut Vector,
 }
 
@@ -549,3 +554,22 @@ pub struct HnswNeighborTupleData {
 
 // 智能指针类型别名
 pub type HnswNeighborTuple = *mut HnswNeighborTupleData;
+
+const HNSW_HEAPTIDS: usize = 10;
+// 主结构体，与 C 的 HnswElementTupleData 对应
+// HnswElementTuple的核心作用是作为 HNSW 索引的​​基本存储单元​​，
+// 它将一个向量及其所有必要的元信息（如层级、删除标记、指向原始数据的指针等）
+// 紧凑地组织在一起，存储在索引页面中
+#[repr(C)]
+pub struct HnswElementTupleData {
+    pub type_: u8,                                  // 类型标识
+    pub level: u8,                                  // 层级信息
+    pub deleted: u8,                                // 删除标志 (0/1)
+    pub unused: u8,                                 // 填充字节
+    pub heaptids: [ItemPointerData; HNSW_HEAPTIDS], // 堆 TID 数组
+    pub neighbortid: ItemPointerData,               // 邻居 TID
+    pub unused2: u16,                               // 填充
+    pub vec: Vector,                                // 向量数据
+}
+
+pub type HnswElementTuple = *mut HnswElementTupleData;

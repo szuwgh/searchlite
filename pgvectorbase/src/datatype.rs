@@ -23,7 +23,6 @@ use std::ffi::CStr;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::ptr::NonNull;
-
 pub const HEADER_MAGIC: u16 = 0x4256; // "VB" for "Vector Base"
 
 use crate::error::VBResult;
@@ -133,7 +132,7 @@ CREATE TYPE vector (
 #[repr(C, align(8))]
 pub struct Vector {
     varlena: u32,
-    len: u16,
+    pub len: u16,
     unused: u16,
     pub x: [f32; 0],
 }
